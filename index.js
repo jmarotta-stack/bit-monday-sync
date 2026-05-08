@@ -171,6 +171,7 @@ function getDateString(date) {
 }
 
 let cachedBitAccessToken = null;
+let cachedBitRefreshToken = process.env.BIT_REFRESH_TOKEN;
 
 async function refreshBitToken() {
   console.log("Refreshing BIT access token...");
@@ -185,9 +186,9 @@ async function refreshBitToken() {
   params.append("grant_type", "refresh_token");
 
   params.append(
-    "refresh_token",
-    process.env.BIT_REFRESH_TOKEN
-  );
+  "refresh_token",
+  cachedBitRefreshToken
+);
 
   const response = await axios.post(
     "https://id.bitv5.net/connect/token",
@@ -202,9 +203,11 @@ async function refreshBitToken() {
   cachedBitAccessToken = response.data.access_token;
 
   if (response.data.refresh_token) {
+  cachedBitRefreshToken = response.data.refresh_token;
+
   console.log(
     "NEW_REFRESH_TOKEN:",
-    response.data.refresh_token
+    cachedBitRefreshToken
   );
 }
 
