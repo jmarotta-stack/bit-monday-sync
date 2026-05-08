@@ -13,6 +13,7 @@ const PORT = process.env.PORT || 10000;
 const MONDAY_API_URL = "https://api.monday.com/v2";
 
 const COLS = {
+  nameText: "text2",
   company: "text59",
   email: "email",
   phone: "phone_1",
@@ -27,7 +28,6 @@ app.get("/", (req, res) => {
 });
 
 async function mondayGraphql(query) {
-
   const response = await axios.post(
     MONDAY_API_URL,
     { query },
@@ -47,7 +47,6 @@ async function mondayGraphql(query) {
 }
 
 async function findMondayItemByRfqId(rfqId) {
-
   const query = `
     query {
       items_page_by_column_values(
@@ -69,7 +68,6 @@ async function findMondayItemByRfqId(rfqId) {
   `;
 
   const data = await mondayGraphql(query);
-
   return data.data.items_page_by_column_values.items[0] || null;
 }
 
@@ -78,20 +76,47 @@ function clean(value) {
 }
 
 function escapeGraphqlString(value) {
-
   return String(value || "")
     .replace(/\\/g, "\\\\")
-    .replace(/"/g, '\\"');
+    .replace(/"/g, '\\"')
+    .replace(/\n/g, "\\n")
+    .replace(/\r/g, "");
+}
+
+async function createMondayUpdate(itemId, rfq) {
+  const specialInstructions = clean(rfq.specialInstruction) || "None";
+  const originZip = clean(rfq.originZip) || "N/A";
+  const destinationZip = clean(rfq.destinationZip) || "N/A";
+
+  const updateBody =
+    `Special Instructions:\n` +
+    `${specialInstructions}\n\n` +
+    `Origin ZIP: ${originZip}\n` +
+    `Destination ZIP: ${destinationZip}`;
+
+  const mutation = `
+    mutation {
+      create_update(
+        item_id: ${itemId},
+        body: "${escapeGraphqlString(updateBody)}"
+      ) {
+        id
+      }
+    }
+  `;
+
+  await mondayGraphql(mutation);
 }
 
 async function createMondayItemFromRfq(rfq) {
-
   const itemName =
     clean(`${rfq.firstName || ""} ${rfq.lastName || ""}`) ||
     rfq.rfqDisplayId ||
     "New RFQ";
 
   const columnValues = {
+    [COLS.nameText]: itemName,
+
     [COLS.company]: clean(rfq.companyName),
 
     [COLS.email]: {
@@ -126,8 +151,11 @@ async function createMondayItemFromRfq(rfq) {
   `;
 
   const data = await mondayGraphql(mutation);
+  const itemId = data.data.create_item.id;
 
-  return data.data.create_item.id;
+  await createMondayUpdate(itemId, rfq);
+
+  return itemId;
 }
 
 function getDateString(date) {
@@ -135,7 +163,6 @@ function getDateString(date) {
 }
 
 async function getBitRfqs() {
-
   const statusId = process.env.BIT_STATUS_ID || 1;
 
   const to = new Date();
@@ -165,7 +192,6 @@ async function getBitRfqs() {
 }
 
 async function runSync() {
-
   const rfqs = await getBitRfqs();
 
   const created = [];
@@ -173,11 +199,8 @@ async function runSync() {
   const failed = [];
 
   for (const rfq of rfqs) {
-
     try {
-
       if (!rfq.rfqId) {
-
         skipped.push({
           rfqDisplayId: rfq.rfqDisplayId,
           reason: "Missing rfqId"
@@ -189,7 +212,6 @@ async function runSync() {
       const existing = await findMondayItemByRfqId(rfq.rfqId);
 
       if (existing) {
-
         skipped.push({
           rfqDisplayId: rfq.rfqDisplayId,
           rfqId: rfq.rfqId,
@@ -207,9 +229,7 @@ async function runSync() {
         rfqId: rfq.rfqId,
         mondayItemId
       });
-
     } catch (itemError) {
-
       failed.push({
         rfqDisplayId: rfq.rfqDisplayId,
         rfqId: rfq.rfqId,
@@ -231,15 +251,10 @@ async function runSync() {
 }
 
 app.get("/sync", async (req, res) => {
-
   try {
-
     const result = await runSync();
-
     res.json(result);
-
   } catch (error) {
-
     console.error(error.response?.data || error.message);
 
     res.status(500).json({
@@ -250,17 +265,12 @@ app.get("/sync", async (req, res) => {
 });
 
 app.post("/sync", async (req, res) => {
-
   try {
-
     console.log("Monday automation called /sync");
 
     const result = await runSync();
-
     res.json(result);
-
   } catch (error) {
-
     console.error(error.response?.data || error.message);
 
     res.status(500).json({
