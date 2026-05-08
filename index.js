@@ -162,6 +162,54 @@ function getDateString(date) {
   return date.toISOString().split("T")[0];
 }
 
+let cachedBitAccessToken = null;
+
+async function refreshBitToken() {
+  console.log("Refreshing BIT access token...");
+
+  const params = new URLSearchParams();
+
+  params.append(
+    "client_id",
+    process.env.BIT_CLIENT_ID || "CNF.BIT.UI"
+  );
+
+  params.append("grant_type", "refresh_token");
+
+  params.append(
+    "refresh_token",
+    process.env.BIT_REFRESH_TOKEN
+  );
+
+  const response = await axios.post(
+    "https://id.bitv5.net/connect/token",
+    params.toString(),
+    {
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded"
+      }
+    }
+  );
+
+  cachedBitAccessToken = response.data.access_token;
+
+  if (response.data.refresh_token) {
+    console.log(
+      "BIT returned a new refresh token."
+    );
+  }
+
+  return cachedBitAccessToken;
+}
+
+async function getBitAccessToken() {
+  if (cachedBitAccessToken) {
+    return cachedBitAccessToken;
+  }
+
+  return await refreshBitToken();
+}
+
 async function getBitRfqs() {
   const statusId = process.env.BIT_STATUS_ID || 1;
 
@@ -182,13 +230,33 @@ async function getBitRfqs() {
 
   console.log("Fetching RFQs from BIT...");
 
-  const response = await axios.get(url, {
-    headers: {
-      Authorization: `Bearer ${process.env.BIT_BEARER_TOKEN}`
-    }
-  });
+    let accessToken = await getBitAccessToken();
 
-  return response.data.data.items || [];
+  try {
+    const response = await axios.get(url, {
+      headers: {
+        Authorization: `Bearer ${accessToken}`
+      }
+    });
+
+    return response.data.data.items || [];
+  } catch (error) {
+    if (error.response?.status === 401 || error.response?.status === 403) {
+      console.log("BIT token expired. Refreshing and retrying once...");
+
+      accessToken = await refreshBitToken();
+
+      const retryResponse = await axios.get(url, {
+        headers: {
+          Authorization: `Bearer ${accessToken}`
+        }
+      });
+
+      return retryResponse.data.data.items || [];
+    }
+
+    throw error;
+  }
 }
 
 async function runSync() {
