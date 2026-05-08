@@ -88,11 +88,19 @@ async function createMondayUpdate(itemId, rfq) {
   const originZip = clean(rfq.originZip) || "N/A";
   const destinationZip = clean(rfq.destinationZip) || "N/A";
 
-  const updateBody =
-    `Special Instructions:\n` +
-    `${specialInstructions}\n\n` +
-    `Origin ZIP: ${originZip}\n` +
-    `Destination ZIP: ${destinationZip}`;
+  const fullName =
+  clean(`${rfq.firstName || ""} ${rfq.lastName || ""}`) || "N/A";
+
+const companyName = clean(rfq.companyName) || "N/A";
+const email = clean(rfq.email) || "N/A";
+
+const updateBody =
+  `Name: ${fullName}\n` +
+  `Company: ${companyName}\n` +
+  `Email: ${email}\n` +
+  `Origin ZIP: ${originZip}\n` +
+  `Destination ZIP: ${destinationZip}\n\n` +
+  `Special Instructions:\n${specialInstructions}`;
 
   const mutation = `
     mutation {
