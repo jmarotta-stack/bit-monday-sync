@@ -194,10 +194,11 @@ async function refreshBitToken() {
   cachedBitAccessToken = response.data.access_token;
 
   if (response.data.refresh_token) {
-    console.log(
-      "BIT returned a new refresh token."
-    );
-  }
+  console.log(
+    "NEW_REFRESH_TOKEN:",
+    response.data.refresh_token
+  );
+}
 
   return cachedBitAccessToken;
 }
