@@ -3,18 +3,14 @@ require("dotenv").config();
 const express = require("express");
 const axios = require("axios");
 const cors = require("cors");
-const { chromium } = require("playwright");
 
 const app = express();
 
 app.use(cors());
 app.use(express.json());
 
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 10000;
 const MONDAY_API_URL = "https://api.monday.com/v2";
-
-let bitAccessToken = null;
-let browserInstance = null;
 
 const COLS = {
   company: "text59",
@@ -30,42 +26,8 @@ app.get("/", (req, res) => {
   res.send("BIT Monday Sync Running");
 });
 
-async function ensureBitLogin() {
-  if (bitAccessToken) return;
-
-  console.log("Logging into BIT automatically...");
-
-  browserInstance = await chromium.launch({
-    headless: true
-  });
-
-  const page = await browserInstance.newPage();
-
-  page.on("request", request => {
-    const headers = request.headers();
-
-    if (headers.authorization && headers.authorization.startsWith("Bearer")) {
-      bitAccessToken = headers.authorization.replace("Bearer ", "");
-      console.log("BIT TOKEN CAPTURED");
-    }
-  });
-
-  await page.goto("https://bitv5.net", {
-    waitUntil: "networkidle"
-  });
-
-  await page.fill('input[placeholder="User Name"]', process.env.BIT_USERNAME);
-  await page.fill('input[placeholder="Password"]', process.env.BIT_PASSWORD);
-  await page.click('button:has-text("Login")');
-
-  await page.waitForTimeout(8000);
-
-  if (!bitAccessToken) {
-    throw new Error("Failed to capture BIT token after login.");
-  }
-}
-
 async function mondayGraphql(query) {
+
   const response = await axios.post(
     MONDAY_API_URL,
     { query },
@@ -85,6 +47,7 @@ async function mondayGraphql(query) {
 }
 
 async function findMondayItemByRfqId(rfqId) {
+
   const query = `
     query {
       items_page_by_column_values(
@@ -106,6 +69,7 @@ async function findMondayItemByRfqId(rfqId) {
   `;
 
   const data = await mondayGraphql(query);
+
   return data.data.items_page_by_column_values.items[0] || null;
 }
 
@@ -114,12 +78,14 @@ function clean(value) {
 }
 
 function escapeGraphqlString(value) {
+
   return String(value || "")
     .replace(/\\/g, "\\\\")
     .replace(/"/g, '\\"');
 }
 
 async function createMondayItemFromRfq(rfq) {
+
   const itemName =
     clean(`${rfq.firstName || ""} ${rfq.lastName || ""}`) ||
     rfq.rfqDisplayId ||
@@ -127,17 +93,23 @@ async function createMondayItemFromRfq(rfq) {
 
   const columnValues = {
     [COLS.company]: clean(rfq.companyName),
+
     [COLS.email]: {
       email: clean(rfq.email),
       text: clean(rfq.email)
     },
+
     [COLS.phone]: {
       phone: clean(rfq.phone),
       countryShortName: "US"
     },
+
     [COLS.trafficSource]: clean(rfq.leadSource),
+
     [COLS.medium]: clean(rfq.categoryMedium),
+
     [COLS.campaignCode]: clean(rfq.campaign),
+
     [COLS.bitRfqId]: clean(rfq.rfqId)
   };
 
@@ -154,6 +126,7 @@ async function createMondayItemFromRfq(rfq) {
   `;
 
   const data = await mondayGraphql(mutation);
+
   return data.data.create_item.id;
 }
 
@@ -162,7 +135,6 @@ function getDateString(date) {
 }
 
 async function getBitRfqs() {
-  await ensureBitLogin();
 
   const statusId = process.env.BIT_STATUS_ID || 1;
 
@@ -185,7 +157,7 @@ async function getBitRfqs() {
 
   const response = await axios.get(url, {
     headers: {
-      Authorization: `Bearer ${bitAccessToken}`
+      Authorization: `Bearer ${process.env.BIT_BEARER_TOKEN}`
     }
   });
 
@@ -193,6 +165,7 @@ async function getBitRfqs() {
 }
 
 async function runSync() {
+
   const rfqs = await getBitRfqs();
 
   const created = [];
@@ -200,24 +173,30 @@ async function runSync() {
   const failed = [];
 
   for (const rfq of rfqs) {
+
     try {
+
       if (!rfq.rfqId) {
+
         skipped.push({
           rfqDisplayId: rfq.rfqDisplayId,
           reason: "Missing rfqId"
         });
+
         continue;
       }
 
       const existing = await findMondayItemByRfqId(rfq.rfqId);
 
       if (existing) {
+
         skipped.push({
           rfqDisplayId: rfq.rfqDisplayId,
           rfqId: rfq.rfqId,
           reason: "Already exists",
           mondayItemId: existing.id
         });
+
         continue;
       }
 
@@ -228,7 +207,9 @@ async function runSync() {
         rfqId: rfq.rfqId,
         mondayItemId
       });
+
     } catch (itemError) {
+
       failed.push({
         rfqDisplayId: rfq.rfqDisplayId,
         rfqId: rfq.rfqId,
@@ -250,12 +231,16 @@ async function runSync() {
 }
 
 app.get("/sync", async (req, res) => {
+
   try {
+
     const result = await runSync();
+
     res.json(result);
+
   } catch (error) {
+
     console.error(error.response?.data || error.message);
-    bitAccessToken = null;
 
     res.status(500).json({
       success: false,
@@ -265,16 +250,18 @@ app.get("/sync", async (req, res) => {
 });
 
 app.post("/sync", async (req, res) => {
+
   try {
+
     console.log("Monday automation called /sync");
-    console.log("Payload:", JSON.stringify(req.body || {}, null, 2));
 
     const result = await runSync();
 
     res.json(result);
+
   } catch (error) {
+
     console.error(error.response?.data || error.message);
-    bitAccessToken = null;
 
     res.status(500).json({
       success: false,
