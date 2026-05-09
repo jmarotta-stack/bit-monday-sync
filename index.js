@@ -20,12 +20,33 @@ const COLS = {
   trafficSource: "text_mkty6s2b",
   medium: "text_mktyazvy",
   campaignCode: "text_mkty4cs2",
-  bitRfqId: "text_mm34238a"
+  bitRfqId: "text_mm34238a",
 };
+
+let cachedBitAccessToken = null;
+let cachedBitRefreshToken = process.env.BIT_REFRESH_TOKEN;
+let bitAccessTokenExpiresAt = 0;
+let refreshPromise = null;
 
 app.get("/", (req, res) => {
   res.send("BIT Monday Sync Running");
 });
+
+function clean(value) {
+  return value ? String(value).trim() : "";
+}
+
+function escapeGraphqlString(value) {
+  return String(value || "")
+    .replace(/\\/g, "\\\\")
+    .replace(/"/g, '\\"')
+    .replace(/\n/g, "\\n")
+    .replace(/\r/g, "");
+}
+
+function getDateString(date) {
+  return date.toISOString().split("T")[0];
+}
 
 async function mondayGraphql(query) {
   const response = await axios.post(
@@ -34,8 +55,8 @@ async function mondayGraphql(query) {
     {
       headers: {
         Authorization: process.env.MONDAY_API_TOKEN,
-        "Content-Type": "application/json"
-      }
+        "Content-Type": "application/json",
+      },
     }
   );
 
@@ -71,36 +92,21 @@ async function findMondayItemByRfqId(rfqId) {
   return data.data.items_page_by_column_values.items[0] || null;
 }
 
-function clean(value) {
-  return value ? String(value).trim() : "";
-}
-
-function escapeGraphqlString(value) {
-  return String(value || "")
-    .replace(/\\/g, "\\\\")
-    .replace(/"/g, '\\"')
-    .replace(/\n/g, "\\n")
-    .replace(/\r/g, "");
-}
-
 async function createMondayUpdate(itemId, rfq) {
   const specialInstructions = clean(rfq.specialInstruction) || "None";
   const originZip = clean(rfq.originZip) || "N/A";
   const destinationZip = clean(rfq.destinationZip) || "N/A";
+  const fullName = clean(`${rfq.firstName || ""} ${rfq.lastName || ""}`) || "N/A";
+  const companyName = clean(rfq.companyName) || "N/A";
+  const email = clean(rfq.email) || "N/A";
 
-  const fullName =
-  clean(`${rfq.firstName || ""} ${rfq.lastName || ""}`) || "N/A";
-
-const companyName = clean(rfq.companyName) || "N/A";
-const email = clean(rfq.email) || "N/A";
-
-const updateBody =
-  `Name: ${fullName}\n` +
-  `Company: ${companyName}\n` +
-  `Email: ${email}\n` +
-  `Origin ZIP: ${originZip}\n` +
-  `Destination ZIP: ${destinationZip}\n\n` +
-  `Special Instructions:\n${specialInstructions}`;
+  const updateBody =
+    `Name: ${fullName}\n` +
+    `Company: ${companyName}\n` +
+    `Email: ${email}\n` +
+    `Origin ZIP: ${originZip}\n` +
+    `Destination ZIP: ${destinationZip}\n\n` +
+    `Special Instructions:\n${specialInstructions}`;
 
   const mutation = `
     mutation {
@@ -122,28 +128,19 @@ async function createMondayItemFromRfq(rfq) {
     rfq.rfqDisplayId ||
     "New RFQ";
 
+  const email = clean(rfq.email);
+
   const columnValues = {
     [COLS.nameText]: itemName,
-
     [COLS.company]: clean(rfq.companyName),
-
-    [COLS.email]: {
-      email: clean(rfq.email),
-      text: clean(rfq.email)
-    },
-
-    [COLS.phone]: {
-      phone: clean(rfq.phone),
-      countryShortName: "US"
-    },
-
+    [COLS.email]: email ? { email, text: email } : "",
+    [COLS.phone]: clean(rfq.phone)
+      ? { phone: clean(rfq.phone), countryShortName: "US" }
+      : "",
     [COLS.trafficSource]: clean(rfq.leadSource),
-
     [COLS.medium]: clean(rfq.categoryMedium),
-
     [COLS.campaignCode]: clean(rfq.campaign),
-
-    [COLS.bitRfqId]: clean(rfq.rfqId)
+    [COLS.bitRfqId]: clean(rfq.rfqId),
   };
 
   const mutation = `
@@ -166,56 +163,67 @@ async function createMondayItemFromRfq(rfq) {
   return itemId;
 }
 
-function getDateString(date) {
-  return date.toISOString().split("T")[0];
-}
-
-let cachedBitAccessToken = null;
-let cachedBitRefreshToken = process.env.BIT_REFRESH_TOKEN;
-
 async function refreshBitToken() {
-  console.log("Refreshing BIT access token...");
+  if (refreshPromise) {
+    return refreshPromise;
+  }
 
-  const params = new URLSearchParams();
+  refreshPromise = (async () => {
+    console.log("Refreshing BIT access token...");
 
-  params.append(
-    "client_id",
-    process.env.BIT_CLIENT_ID || "CNF.BIT.UI"
-  );
-
-  params.append("grant_type", "refresh_token");
-
-  params.append(
-  "refresh_token",
-  cachedBitRefreshToken
-);
-
-  const response = await axios.post(
-    "https://id.bitv5.net/connect/token",
-    params.toString(),
-    {
-      headers: {
-        "Content-Type": "application/x-www-form-urlencoded"
-      }
+    if (!cachedBitRefreshToken) {
+      throw new Error("Missing BIT refresh token");
     }
-  );
 
-  cachedBitAccessToken = response.data.access_token;
+    const params = new URLSearchParams();
 
-  if (response.data.refresh_token) {
-  cachedBitRefreshToken = response.data.refresh_token;
+    params.append("client_id", process.env.BIT_CLIENT_ID || "CNF.BIT.UI");
+    params.append("grant_type", "refresh_token");
+    params.append("refresh_token", cachedBitRefreshToken);
 
-  console.log(
-    "NEW_REFRESH_TOKEN:",
-    cachedBitRefreshToken
-  );
-}
+    const response = await axios.post(
+      "https://id.bitv5.net/connect/token",
+      params.toString(),
+      {
+        headers: {
+          "Content-Type": "application/x-www-form-urlencoded",
+        },
+      }
+    );
 
-  return cachedBitAccessToken;
+    cachedBitAccessToken = response.data.access_token;
+
+    const expiresInSeconds = response.data.expires_in || 21600;
+    bitAccessTokenExpiresAt = Date.now() + expiresInSeconds * 1000;
+
+    console.log(
+      "BIT access token expires at:",
+      new Date(bitAccessTokenExpiresAt).toISOString()
+    );
+
+    if (response.data.refresh_token) {
+      cachedBitRefreshToken = response.data.refresh_token;
+
+      console.log("NEW_REFRESH_TOKEN:", cachedBitRefreshToken);
+    }
+
+    return cachedBitAccessToken;
+  })();
+
+  try {
+    return await refreshPromise;
+  } finally {
+    refreshPromise = null;
+  }
 }
 
 async function getBitAccessToken() {
-  if (cachedBitAccessToken) {
+  const fiveMinutesFromNow = Date.now() + 5 * 60 * 1000;
+
+  if (
+    cachedBitAccessToken &&
+    bitAccessTokenExpiresAt > fiveMinutesFromNow
+  ) {
     return cachedBitAccessToken;
   }
 
@@ -224,7 +232,6 @@ async function getBitAccessToken() {
 
 async function getBitRfqs() {
   const statusId = process.env.BIT_STATUS_ID || 1;
-
   const to = new Date();
   const from = new Date(process.env.BIT_FROM_DATE);
 
@@ -242,26 +249,26 @@ async function getBitRfqs() {
 
   console.log("Fetching RFQs from BIT...");
 
-    let accessToken = await getBitAccessToken();
+  let accessToken = await getBitAccessToken();
 
   try {
     const response = await axios.get(url, {
       headers: {
-        Authorization: `Bearer ${accessToken}`
-      }
+        Authorization: `Bearer ${accessToken}`,
+      },
     });
 
     return response.data.data.items || [];
   } catch (error) {
     if (error.response?.status === 401 || error.response?.status === 403) {
-      console.log("BIT token expired. Refreshing and retrying once...");
+      console.log("BIT token rejected. Refreshing and retrying once...");
 
       accessToken = await refreshBitToken();
 
       const retryResponse = await axios.get(url, {
         headers: {
-          Authorization: `Bearer ${accessToken}`
-        }
+          Authorization: `Bearer ${accessToken}`,
+        },
       });
 
       return retryResponse.data.data.items || [];
@@ -283,7 +290,7 @@ async function runSync() {
       if (!rfq.rfqId) {
         skipped.push({
           rfqDisplayId: rfq.rfqDisplayId,
-          reason: "Missing rfqId"
+          reason: "Missing rfqId",
         });
 
         continue;
@@ -296,7 +303,7 @@ async function runSync() {
           rfqDisplayId: rfq.rfqDisplayId,
           rfqId: rfq.rfqId,
           reason: "Already exists",
-          mondayItemId: existing.id
+          mondayItemId: existing.id,
         });
 
         continue;
@@ -307,13 +314,13 @@ async function runSync() {
       created.push({
         rfqDisplayId: rfq.rfqDisplayId,
         rfqId: rfq.rfqId,
-        mondayItemId
+        mondayItemId,
       });
     } catch (itemError) {
       failed.push({
         rfqDisplayId: rfq.rfqDisplayId,
         rfqId: rfq.rfqId,
-        error: itemError.message
+        error: itemError.message,
       });
     }
   }
@@ -326,7 +333,7 @@ async function runSync() {
     failedCount: failed.length,
     created,
     skipped,
-    failed
+    failed,
   };
 }
 
@@ -339,7 +346,7 @@ app.get("/sync", async (req, res) => {
 
     res.status(500).json({
       success: false,
-      error: error.response?.data || error.message
+      error: error.response?.data || error.message,
     });
   }
 });
@@ -355,7 +362,7 @@ app.post("/sync", async (req, res) => {
 
     res.status(500).json({
       success: false,
-      error: error.response?.data || error.message
+      error: error.response?.data || error.message,
     });
   }
 });
