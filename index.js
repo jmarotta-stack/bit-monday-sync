@@ -3,6 +3,7 @@ require("dotenv").config();
 const express = require("express");
 const axios = require("axios");
 const cors = require("cors");
+const { Pool } = require("pg");
 
 const app = express();
 
@@ -22,6 +23,13 @@ const COLS = {
   campaignCode: "text_mkty4cs2",
   bitRfqId: "text_mm34238a",
 };
+
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: {
+    rejectUnauthorized: false,
+  },
+});
 
 let cachedBitAccessToken = null;
 let cachedBitRefreshToken = process.env.BIT_REFRESH_TOKEN;
@@ -46,6 +54,41 @@ function escapeGraphqlString(value) {
 
 function getDateString(date) {
   return date.toISOString().split("T")[0];
+}
+
+async function initTokenStore() {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS app_tokens (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL,
+      updated_at TIMESTAMPTZ DEFAULT NOW()
+    )
+  `);
+
+  console.log("Token store ready");
+}
+
+async function getStoredRefreshToken() {
+  const result = await pool.query(
+    "SELECT value FROM app_tokens WHERE key = $1",
+    ["bit_refresh_token"]
+  );
+
+  return result.rows[0]?.value || process.env.BIT_REFRESH_TOKEN;
+}
+
+async function saveStoredRefreshToken(token) {
+  await pool.query(
+    `
+    INSERT INTO app_tokens (key, value, updated_at)
+    VALUES ($1, $2, NOW())
+    ON CONFLICT (key)
+    DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()
+    `,
+    ["bit_refresh_token", token]
+  );
+
+  console.log("Saved latest BIT refresh token to database");
 }
 
 async function mondayGraphql(query) {
@@ -171,6 +214,8 @@ async function refreshBitToken() {
   refreshPromise = (async () => {
     console.log("Refreshing BIT access token...");
 
+    cachedBitRefreshToken = await getStoredRefreshToken();
+
     if (!cachedBitRefreshToken) {
       throw new Error("Missing BIT refresh token");
     }
@@ -203,8 +248,8 @@ async function refreshBitToken() {
 
     if (response.data.refresh_token) {
       cachedBitRefreshToken = response.data.refresh_token;
-
-      console.log("NEW_REFRESH_TOKEN:", cachedBitRefreshToken);
+      await saveStoredRefreshToken(cachedBitRefreshToken);
+      console.log("NEW_REFRESH_TOKEN saved to database");
     }
 
     return cachedBitAccessToken;
@@ -367,6 +412,15 @@ app.post("/sync", async (req, res) => {
   }
 });
 
-app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
+async function startServer() {
+  await initTokenStore();
+
+  app.listen(PORT, () => {
+    console.log(`Server running on port ${PORT}`);
+  });
+}
+
+startServer().catch((error) => {
+  console.error("Failed to start server:", error);
+  process.exit(1);
 });
