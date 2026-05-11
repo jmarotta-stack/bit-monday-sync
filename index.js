@@ -41,6 +41,30 @@ app.get("/", (req, res) => {
   res.send("BIT Monday Sync Running");
 });
 
+app.get("/reset-tokens", async (req, res) => {
+  try {
+    await pool.query("DELETE FROM app_tokens");
+
+    cachedBitAccessToken = null;
+    cachedBitRefreshToken = null;
+    bitAccessTokenExpiresAt = 0;
+
+    console.log("All stored BIT tokens cleared");
+
+    res.json({
+      success: true,
+      message: "All stored BIT tokens cleared",
+    });
+  } catch (error) {
+    console.error(error);
+
+    res.status(500).json({
+      success: false,
+      error: error.message,
+    });
+  }
+});
+
 function clean(value) {
   return value ? String(value).trim() : "";
 }
@@ -92,9 +116,14 @@ async function setTokenValue(key, value) {
 
 async function getStoredBitTokens() {
   const accessToken = await getTokenValue("bit_access_token");
+
   const refreshToken =
-    (await getTokenValue("bit_refresh_token")) || process.env.BIT_REFRESH_TOKEN;
-  const expiresAtRaw = await getTokenValue("bit_access_token_expires_at");
+    (await getTokenValue("bit_refresh_token")) ||
+    process.env.BIT_REFRESH_TOKEN;
+
+  const expiresAtRaw = await getTokenValue(
+    "bit_access_token_expires_at"
+  );
 
   return {
     accessToken,
@@ -103,7 +132,11 @@ async function getStoredBitTokens() {
   };
 }
 
-async function saveStoredBitTokens({ accessToken, refreshToken, expiresAt }) {
+async function saveStoredBitTokens({
+  accessToken,
+  refreshToken,
+  expiresAt,
+}) {
   if (accessToken) {
     await setTokenValue("bit_access_token", accessToken);
   }
@@ -113,7 +146,10 @@ async function saveStoredBitTokens({ accessToken, refreshToken, expiresAt }) {
   }
 
   if (expiresAt) {
-    await setTokenValue("bit_access_token_expires_at", expiresAt);
+    await setTokenValue(
+      "bit_access_token_expires_at",
+      expiresAt
+    );
   }
 
   console.log("Saved BIT tokens to database");
@@ -160,15 +196,27 @@ async function findMondayItemByRfqId(rfqId) {
   `;
 
   const data = await mondayGraphql(query);
+
   return data.data.items_page_by_column_values.items[0] || null;
 }
 
 async function createMondayUpdate(itemId, rfq) {
-  const specialInstructions = clean(rfq.specialInstruction) || "None";
+  const specialInstructions =
+    clean(rfq.specialInstruction) || "None";
+
   const originZip = clean(rfq.originZip) || "N/A";
-  const destinationZip = clean(rfq.destinationZip) || "N/A";
-  const fullName = clean(`${rfq.firstName || ""} ${rfq.lastName || ""}`) || "N/A";
-  const companyName = clean(rfq.companyName) || "N/A";
+
+  const destinationZip =
+    clean(rfq.destinationZip) || "N/A";
+
+  const fullName =
+    clean(
+      `${rfq.firstName || ""} ${rfq.lastName || ""}`
+    ) || "N/A";
+
+  const companyName =
+    clean(rfq.companyName) || "N/A";
+
   const email = clean(rfq.email) || "N/A";
 
   const updateBody =
@@ -195,7 +243,9 @@ async function createMondayUpdate(itemId, rfq) {
 
 async function createMondayItemFromRfq(rfq) {
   const itemName =
-    clean(`${rfq.firstName || ""} ${rfq.lastName || ""}`) ||
+    clean(
+      `${rfq.firstName || ""} ${rfq.lastName || ""}`
+    ) ||
     rfq.rfqDisplayId ||
     "New RFQ";
 
@@ -203,14 +253,26 @@ async function createMondayItemFromRfq(rfq) {
 
   const columnValues = {
     [COLS.nameText]: itemName,
+
     [COLS.company]: clean(rfq.companyName),
-    [COLS.email]: email ? { email, text: email } : "",
-    [COLS.phone]: clean(rfq.phone)
-      ? { phone: clean(rfq.phone), countryShortName: "US" }
+
+    [COLS.email]: email
+      ? { email, text: email }
       : "",
+
+    [COLS.phone]: clean(rfq.phone)
+      ? {
+          phone: clean(rfq.phone),
+          countryShortName: "US",
+        }
+      : "",
+
     [COLS.trafficSource]: clean(rfq.leadSource),
+
     [COLS.medium]: clean(rfq.categoryMedium),
+
     [COLS.campaignCode]: clean(rfq.campaign),
+
     [COLS.bitRfqId]: clean(rfq.rfqId),
   };
 
@@ -219,7 +281,9 @@ async function createMondayItemFromRfq(rfq) {
       create_item(
         board_id: ${process.env.MONDAY_BOARD_ID},
         item_name: "${escapeGraphqlString(itemName)}",
-        column_values: ${JSON.stringify(JSON.stringify(columnValues))}
+        column_values: ${JSON.stringify(
+          JSON.stringify(columnValues)
+        )}
       ) {
         id
       }
@@ -227,6 +291,7 @@ async function createMondayItemFromRfq(rfq) {
   `;
 
   const data = await mondayGraphql(mutation);
+
   const itemId = data.data.create_item.id;
 
   await createMondayUpdate(itemId, rfq);
@@ -235,7 +300,9 @@ async function createMondayItemFromRfq(rfq) {
 }
 
 function isAccessTokenStillValid(expiresAt) {
-  const fiveMinutesFromNow = Date.now() + 5 * 60 * 1000;
+  const fiveMinutesFromNow =
+    Date.now() + 5 * 60 * 1000;
+
   return expiresAt && expiresAt > fiveMinutesFromNow;
 }
 
@@ -249,73 +316,124 @@ async function refreshBitToken() {
 
     try {
       console.log("Waiting for BIT refresh lock...");
-      await client.query("SELECT pg_advisory_lock($1)", [BIT_TOKEN_LOCK_ID]);
+
+      await client.query(
+        "SELECT pg_advisory_lock($1)",
+        [BIT_TOKEN_LOCK_ID]
+      );
+
       console.log("Refresh lock acquired");
 
-      const latestTokens = await getStoredBitTokens();
+      const latestTokens =
+        await getStoredBitTokens();
 
       if (
         latestTokens.accessToken &&
-        isAccessTokenStillValid(latestTokens.expiresAt)
+        isAccessTokenStillValid(
+          latestTokens.expiresAt
+        )
       ) {
-        console.log("Another instance already refreshed BIT token");
+        console.log(
+          "Another instance already refreshed BIT token"
+        );
 
-        cachedBitAccessToken = latestTokens.accessToken;
-        cachedBitRefreshToken = latestTokens.refreshToken;
-        bitAccessTokenExpiresAt = latestTokens.expiresAt;
+        cachedBitAccessToken =
+          latestTokens.accessToken;
+
+        cachedBitRefreshToken =
+          latestTokens.refreshToken;
+
+        bitAccessTokenExpiresAt =
+          latestTokens.expiresAt;
 
         return cachedBitAccessToken;
       }
 
-      cachedBitRefreshToken = latestTokens.refreshToken;
+      cachedBitRefreshToken =
+        latestTokens.refreshToken;
 
       if (!cachedBitRefreshToken) {
-        throw new Error("Missing BIT refresh token");
+        throw new Error(
+          "Missing BIT refresh token"
+        );
       }
 
-      console.log("Refreshing BIT access token...");
+      console.log(
+        "Refreshing BIT access token..."
+      );
 
       const params = new URLSearchParams();
 
-      params.append("client_id", process.env.BIT_CLIENT_ID || "CNF.BIT.UI");
-      params.append("grant_type", "refresh_token");
-      params.append("refresh_token", cachedBitRefreshToken);
+      params.append(
+        "client_id",
+        process.env.BIT_CLIENT_ID ||
+          "CNF.BIT.UI"
+      );
+
+      params.append(
+        "grant_type",
+        "refresh_token"
+      );
+
+      params.append(
+        "refresh_token",
+        cachedBitRefreshToken
+      );
 
       const response = await axios.post(
         "https://id.bitv5.net/connect/token",
         params.toString(),
         {
           headers: {
-            "Content-Type": "application/x-www-form-urlencoded",
+            "Content-Type":
+              "application/x-www-form-urlencoded",
           },
         }
       );
 
-      cachedBitAccessToken = response.data.access_token;
+      cachedBitAccessToken =
+        response.data.access_token;
 
-      const expiresInSeconds = response.data.expires_in || 21600;
-      bitAccessTokenExpiresAt = Date.now() + expiresInSeconds * 1000;
+      const expiresInSeconds =
+        response.data.expires_in || 21600;
+
+      bitAccessTokenExpiresAt =
+        Date.now() +
+        expiresInSeconds * 1000;
 
       if (response.data.refresh_token) {
-        cachedBitRefreshToken = response.data.refresh_token;
+        cachedBitRefreshToken =
+          response.data.refresh_token;
       }
 
       await saveStoredBitTokens({
-        accessToken: cachedBitAccessToken,
-        refreshToken: cachedBitRefreshToken,
-        expiresAt: bitAccessTokenExpiresAt,
+        accessToken:
+          cachedBitAccessToken,
+        refreshToken:
+          cachedBitRefreshToken,
+        expiresAt:
+          bitAccessTokenExpiresAt,
       });
 
       console.log(
         "BIT access token expires at:",
-        new Date(bitAccessTokenExpiresAt).toISOString()
+        new Date(
+          bitAccessTokenExpiresAt
+        ).toISOString()
       );
 
       return cachedBitAccessToken;
     } finally {
-      await client.query("SELECT pg_advisory_unlock($1)", [BIT_TOKEN_LOCK_ID]);
+      await client.query(
+        "SELECT pg_advisory_unlock($1)",
+        [BIT_TOKEN_LOCK_ID]
+      );
+
       client.release();
-      console.log("Refresh lock released");
+
+      console.log(
+        "Refresh lock released"
+      );
     }
   })();
 
@@ -329,20 +447,30 @@ async function refreshBitToken() {
 async function getBitAccessToken() {
   if (
     cachedBitAccessToken &&
-    isAccessTokenStillValid(bitAccessTokenExpiresAt)
+    isAccessTokenStillValid(
+      bitAccessTokenExpiresAt
+    )
   ) {
     return cachedBitAccessToken;
   }
 
-  const storedTokens = await getStoredBitTokens();
+  const storedTokens =
+    await getStoredBitTokens();
 
   if (
     storedTokens.accessToken &&
-    isAccessTokenStillValid(storedTokens.expiresAt)
+    isAccessTokenStillValid(
+      storedTokens.expiresAt
+    )
   ) {
-    cachedBitAccessToken = storedTokens.accessToken;
-    cachedBitRefreshToken = storedTokens.refreshToken;
-    bitAccessTokenExpiresAt = storedTokens.expiresAt;
+    cachedBitAccessToken =
+      storedTokens.accessToken;
+
+    cachedBitRefreshToken =
+      storedTokens.refreshToken;
+
+    bitAccessTokenExpiresAt =
+      storedTokens.expiresAt;
 
     return cachedBitAccessToken;
   }
@@ -351,9 +479,14 @@ async function getBitAccessToken() {
 }
 
 async function getBitRfqs() {
-  const statusId = process.env.BIT_STATUS_ID || 1;
+  const statusId =
+    process.env.BIT_STATUS_ID || 1;
+
   const to = new Date();
-  const from = new Date(process.env.BIT_FROM_DATE);
+
+  const from = new Date(
+    process.env.BIT_FROM_DATE
+  );
 
   const url =
     `https://api.bitv5.net/api/RFQ/Browse` +
@@ -369,7 +502,8 @@ async function getBitRfqs() {
 
   console.log("Fetching RFQs from BIT...");
 
-  let accessToken = await getBitAccessToken();
+  let accessToken =
+    await getBitAccessToken();
 
   try {
     const response = await axios.get(url, {
@@ -378,25 +512,41 @@ async function getBitRfqs() {
       },
     });
 
-    return response.data.data.items || [];
+    return (
+      response.data.data.items || []
+    );
   } catch (error) {
-    if (error.response?.status === 401 || error.response?.status === 403) {
-      console.log("BIT token rejected. Clearing access token and retrying refresh once...");
+    if (
+      error.response?.status === 401 ||
+      error.response?.status === 403
+    ) {
+      console.log(
+        "BIT token rejected. Clearing access token and retrying refresh once..."
+      );
 
       cachedBitAccessToken = null;
+
       bitAccessTokenExpiresAt = 0;
 
-      await setTokenValue("bit_access_token_expires_at", "0");
+      await setTokenValue(
+        "bit_access_token_expires_at",
+        "0"
+      );
 
-      accessToken = await refreshBitToken();
+      accessToken =
+        await refreshBitToken();
 
-      const retryResponse = await axios.get(url, {
-        headers: {
-          Authorization: `Bearer ${accessToken}`,
-        },
-      });
+      const retryResponse =
+        await axios.get(url, {
+          headers: {
+            Authorization: `Bearer ${accessToken}`,
+          },
+        });
 
-      return retryResponse.data.data.items || [];
+      return (
+        retryResponse.data.data.items ||
+        []
+      );
     }
 
     throw error;
@@ -414,38 +564,51 @@ async function runSync() {
     try {
       if (!rfq.rfqId) {
         skipped.push({
-          rfqDisplayId: rfq.rfqDisplayId,
+          rfqDisplayId:
+            rfq.rfqDisplayId,
           reason: "Missing rfqId",
         });
 
         continue;
       }
 
-      const existing = await findMondayItemByRfqId(rfq.rfqId);
+      const existing =
+        await findMondayItemByRfqId(
+          rfq.rfqId
+        );
 
       if (existing) {
         skipped.push({
-          rfqDisplayId: rfq.rfqDisplayId,
+          rfqDisplayId:
+            rfq.rfqDisplayId,
           rfqId: rfq.rfqId,
-          reason: "Already exists",
-          mondayItemId: existing.id,
+          reason:
+            "Already exists",
+          mondayItemId:
+            existing.id,
         });
 
         continue;
       }
 
-      const mondayItemId = await createMondayItemFromRfq(rfq);
+      const mondayItemId =
+        await createMondayItemFromRfq(
+          rfq
+        );
 
       created.push({
-        rfqDisplayId: rfq.rfqDisplayId,
+        rfqDisplayId:
+          rfq.rfqDisplayId,
         rfqId: rfq.rfqId,
         mondayItemId,
       });
     } catch (itemError) {
       failed.push({
-        rfqDisplayId: rfq.rfqDisplayId,
+        rfqDisplayId:
+          rfq.rfqDisplayId,
         rfqId: rfq.rfqId,
-        error: itemError.message,
+        error:
+          itemError.message,
       });
     }
   }
@@ -453,9 +616,12 @@ async function runSync() {
   return {
     success: true,
     checked: rfqs.length,
-    createdCount: created.length,
-    skippedCount: skipped.length,
-    failedCount: failed.length,
+    createdCount:
+      created.length,
+    skippedCount:
+      skipped.length,
+    failedCount:
+      failed.length,
     created,
     skipped,
     failed,
@@ -465,29 +631,43 @@ async function runSync() {
 app.get("/sync", async (req, res) => {
   try {
     const result = await runSync();
+
     res.json(result);
   } catch (error) {
-    console.error(error.response?.data || error.message);
+    console.error(
+      error.response?.data ||
+        error.message
+    );
 
     res.status(500).json({
       success: false,
-      error: error.response?.data || error.message,
+      error:
+        error.response?.data ||
+        error.message,
     });
   }
 });
 
 app.post("/sync", async (req, res) => {
   try {
-    console.log("Monday automation called /sync");
+    console.log(
+      "Monday automation called /sync"
+    );
 
     const result = await runSync();
+
     res.json(result);
   } catch (error) {
-    console.error(error.response?.data || error.message);
+    console.error(
+      error.response?.data ||
+        error.message
+    );
 
     res.status(500).json({
       success: false,
-      error: error.response?.data || error.message,
+      error:
+        error.response?.data ||
+        error.message,
     });
   }
 });
@@ -496,11 +676,17 @@ async function startServer() {
   await initTokenStore();
 
   app.listen(PORT, () => {
-    console.log(`Server running on port ${PORT}`);
+    console.log(
+      `Server running on port ${PORT}`
+    );
   });
 }
 
 startServer().catch((error) => {
-  console.error("Failed to start server:", error);
+  console.error(
+    "Failed to start server:",
+    error
+  );
+
   process.exit(1);
 });
