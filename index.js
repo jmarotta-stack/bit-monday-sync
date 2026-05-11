@@ -12,6 +12,7 @@ app.use(express.json());
 
 const PORT = process.env.PORT || 10000;
 const MONDAY_API_URL = "https://api.monday.com/v2";
+const BIT_TOKEN_LOCK_ID = 987654321;
 
 const COLS = {
   nameText: "text2",
@@ -32,7 +33,7 @@ const pool = new Pool({
 });
 
 let cachedBitAccessToken = null;
-let cachedBitRefreshToken = process.env.BIT_REFRESH_TOKEN;
+let cachedBitRefreshToken = null;
 let bitAccessTokenExpiresAt = 0;
 let refreshPromise = null;
 
@@ -68,16 +69,16 @@ async function initTokenStore() {
   console.log("Token store ready");
 }
 
-async function getStoredRefreshToken() {
+async function getTokenValue(key) {
   const result = await pool.query(
     "SELECT value FROM app_tokens WHERE key = $1",
-    ["bit_refresh_token"]
+    [key]
   );
 
-  return result.rows[0]?.value || process.env.BIT_REFRESH_TOKEN;
+  return result.rows[0]?.value || null;
 }
 
-async function saveStoredRefreshToken(token) {
+async function setTokenValue(key, value) {
   await pool.query(
     `
     INSERT INTO app_tokens (key, value, updated_at)
@@ -85,10 +86,37 @@ async function saveStoredRefreshToken(token) {
     ON CONFLICT (key)
     DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()
     `,
-    ["bit_refresh_token", token]
+    [key, String(value)]
   );
+}
 
-  console.log("Saved latest BIT refresh token to database");
+async function getStoredBitTokens() {
+  const accessToken = await getTokenValue("bit_access_token");
+  const refreshToken =
+    (await getTokenValue("bit_refresh_token")) || process.env.BIT_REFRESH_TOKEN;
+  const expiresAtRaw = await getTokenValue("bit_access_token_expires_at");
+
+  return {
+    accessToken,
+    refreshToken,
+    expiresAt: expiresAtRaw ? Number(expiresAtRaw) : 0,
+  };
+}
+
+async function saveStoredBitTokens({ accessToken, refreshToken, expiresAt }) {
+  if (accessToken) {
+    await setTokenValue("bit_access_token", accessToken);
+  }
+
+  if (refreshToken) {
+    await setTokenValue("bit_refresh_token", refreshToken);
+  }
+
+  if (expiresAt) {
+    await setTokenValue("bit_access_token_expires_at", expiresAt);
+  }
+
+  console.log("Saved BIT tokens to database");
 }
 
 async function mondayGraphql(query) {
@@ -206,53 +234,89 @@ async function createMondayItemFromRfq(rfq) {
   return itemId;
 }
 
+function isAccessTokenStillValid(expiresAt) {
+  const fiveMinutesFromNow = Date.now() + 5 * 60 * 1000;
+  return expiresAt && expiresAt > fiveMinutesFromNow;
+}
+
 async function refreshBitToken() {
   if (refreshPromise) {
     return refreshPromise;
   }
 
   refreshPromise = (async () => {
-    console.log("Refreshing BIT access token...");
+    const client = await pool.connect();
 
-    cachedBitRefreshToken = await getStoredRefreshToken();
+    try {
+      console.log("Waiting for BIT refresh lock...");
+      await client.query("SELECT pg_advisory_lock($1)", [BIT_TOKEN_LOCK_ID]);
+      console.log("Refresh lock acquired");
 
-    if (!cachedBitRefreshToken) {
-      throw new Error("Missing BIT refresh token");
-    }
+      const latestTokens = await getStoredBitTokens();
 
-    const params = new URLSearchParams();
+      if (
+        latestTokens.accessToken &&
+        isAccessTokenStillValid(latestTokens.expiresAt)
+      ) {
+        console.log("Another instance already refreshed BIT token");
 
-    params.append("client_id", process.env.BIT_CLIENT_ID || "CNF.BIT.UI");
-    params.append("grant_type", "refresh_token");
-    params.append("refresh_token", cachedBitRefreshToken);
+        cachedBitAccessToken = latestTokens.accessToken;
+        cachedBitRefreshToken = latestTokens.refreshToken;
+        bitAccessTokenExpiresAt = latestTokens.expiresAt;
 
-    const response = await axios.post(
-      "https://id.bitv5.net/connect/token",
-      params.toString(),
-      {
-        headers: {
-          "Content-Type": "application/x-www-form-urlencoded",
-        },
+        return cachedBitAccessToken;
       }
-    );
 
-    cachedBitAccessToken = response.data.access_token;
+      cachedBitRefreshToken = latestTokens.refreshToken;
 
-    const expiresInSeconds = response.data.expires_in || 21600;
-    bitAccessTokenExpiresAt = Date.now() + expiresInSeconds * 1000;
+      if (!cachedBitRefreshToken) {
+        throw new Error("Missing BIT refresh token");
+      }
 
-    console.log(
-      "BIT access token expires at:",
-      new Date(bitAccessTokenExpiresAt).toISOString()
-    );
+      console.log("Refreshing BIT access token...");
 
-    if (response.data.refresh_token) {
-      cachedBitRefreshToken = response.data.refresh_token;
-      await saveStoredRefreshToken(cachedBitRefreshToken);
-      console.log("NEW_REFRESH_TOKEN saved to database");
+      const params = new URLSearchParams();
+
+      params.append("client_id", process.env.BIT_CLIENT_ID || "CNF.BIT.UI");
+      params.append("grant_type", "refresh_token");
+      params.append("refresh_token", cachedBitRefreshToken);
+
+      const response = await axios.post(
+        "https://id.bitv5.net/connect/token",
+        params.toString(),
+        {
+          headers: {
+            "Content-Type": "application/x-www-form-urlencoded",
+          },
+        }
+      );
+
+      cachedBitAccessToken = response.data.access_token;
+
+      const expiresInSeconds = response.data.expires_in || 21600;
+      bitAccessTokenExpiresAt = Date.now() + expiresInSeconds * 1000;
+
+      if (response.data.refresh_token) {
+        cachedBitRefreshToken = response.data.refresh_token;
+      }
+
+      await saveStoredBitTokens({
+        accessToken: cachedBitAccessToken,
+        refreshToken: cachedBitRefreshToken,
+        expiresAt: bitAccessTokenExpiresAt,
+      });
+
+      console.log(
+        "BIT access token expires at:",
+        new Date(bitAccessTokenExpiresAt).toISOString()
+      );
+
+      return cachedBitAccessToken;
+    } finally {
+      await client.query("SELECT pg_advisory_unlock($1)", [BIT_TOKEN_LOCK_ID]);
+      client.release();
+      console.log("Refresh lock released");
     }
-
-    return cachedBitAccessToken;
   })();
 
   try {
@@ -263,12 +327,23 @@ async function refreshBitToken() {
 }
 
 async function getBitAccessToken() {
-  const fiveMinutesFromNow = Date.now() + 5 * 60 * 1000;
-
   if (
     cachedBitAccessToken &&
-    bitAccessTokenExpiresAt > fiveMinutesFromNow
+    isAccessTokenStillValid(bitAccessTokenExpiresAt)
   ) {
+    return cachedBitAccessToken;
+  }
+
+  const storedTokens = await getStoredBitTokens();
+
+  if (
+    storedTokens.accessToken &&
+    isAccessTokenStillValid(storedTokens.expiresAt)
+  ) {
+    cachedBitAccessToken = storedTokens.accessToken;
+    cachedBitRefreshToken = storedTokens.refreshToken;
+    bitAccessTokenExpiresAt = storedTokens.expiresAt;
+
     return cachedBitAccessToken;
   }
 
@@ -306,7 +381,12 @@ async function getBitRfqs() {
     return response.data.data.items || [];
   } catch (error) {
     if (error.response?.status === 401 || error.response?.status === 403) {
-      console.log("BIT token rejected. Refreshing and retrying once...");
+      console.log("BIT token rejected. Clearing access token and retrying refresh once...");
+
+      cachedBitAccessToken = null;
+      bitAccessTokenExpiresAt = 0;
+
+      await setTokenValue("bit_access_token_expires_at", "0");
 
       accessToken = await refreshBitToken();
 
